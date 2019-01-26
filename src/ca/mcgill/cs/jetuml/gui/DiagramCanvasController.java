@@ -22,29 +22,26 @@ package ca.mcgill.cs.jetuml.gui;
 
 import java.util.ArrayList;
 import java.util.HashSet;
-import java.util.Iterator;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 
 import ca.mcgill.cs.jetuml.application.Clipboard;
 import ca.mcgill.cs.jetuml.application.MoveTracker;
-import ca.mcgill.cs.jetuml.diagram.DiagramElement;
-import ca.mcgill.cs.jetuml.diagram.DiagramType;
-import ca.mcgill.cs.jetuml.diagram.Edge;
-import ca.mcgill.cs.jetuml.diagram.Node;
+import ca.mcgill.cs.jetuml.diagram.*;
 import ca.mcgill.cs.jetuml.diagram.builder.CompoundOperation;
 import ca.mcgill.cs.jetuml.diagram.builder.DiagramBuilder;
 import ca.mcgill.cs.jetuml.diagram.builder.DiagramOperationProcessor;
 import ca.mcgill.cs.jetuml.diagram.nodes.ChildNode;
 import ca.mcgill.cs.jetuml.diagram.nodes.ParentNode;
 import ca.mcgill.cs.jetuml.geom.Dimension;
-import ca.mcgill.cs.jetuml.geom.Line;
 import ca.mcgill.cs.jetuml.geom.Point;
-import ca.mcgill.cs.jetuml.geom.Rectangle;
+import ca.mcgill.cs.jetuml.gui.dragmodes.*;
 import ca.mcgill.cs.jetuml.views.Grid;
 import javafx.scene.input.MouseEvent;
 import javafx.stage.Stage;
+
+import static ca.mcgill.cs.jetuml.gui.GuiUtils.getMousePoint;
 
 /**
  * An instance of this class is responsible to handle the user
@@ -52,9 +49,6 @@ import javafx.stage.Stage;
  */
 public class DiagramCanvasController
 {
-	private enum DragMode 
-	{ DRAG_NONE, DRAG_MOVE, DRAG_RUBBERBAND, DRAG_LASSO }
-	
 	private static final int CONNECT_THRESHOLD = 8;
 	private static final int GRID_SIZE = 10;
 	
@@ -63,9 +57,7 @@ public class DiagramCanvasController
 	private final DiagramCanvas aCanvas;
 	private final DiagramBuilder aDiagramBuilder;
 	private final DiagramTabToolBar aToolBar;
-	private DragMode aDragMode;
-	private Point aLastMousePoint;
-	private Point aMouseDownPoint;  
+	private DragMode aDragMode = new NoneDragMode();
 	private DiagramOperationProcessor aProcessor = new DiagramOperationProcessor();
 	private boolean aModified = false;
 	private MouseDraggedGestureHandler aHandler;
@@ -251,25 +243,6 @@ public class DiagramCanvasController
 		Clipboard.instance().copy(aSelectionModel);
 		removeSelected();
 	}
-	
-	private Line computeRubberband()
-	{
-		return new Line(new Point(aMouseDownPoint.getX(), aMouseDownPoint.getY()), 
-				new Point(aLastMousePoint.getX(), aLastMousePoint.getY()));
-	}
-	
-	private Rectangle computeLasso()
-	{
-		return new Rectangle((int) Math.min(aMouseDownPoint.getX(), aLastMousePoint.getX()), 
-						     (int) Math.min(aMouseDownPoint.getY(), aLastMousePoint.getY()), 
-						     (int) Math.abs(aMouseDownPoint.getX() - aLastMousePoint.getX()) , 
-						     (int) Math.abs(aMouseDownPoint.getY() - aLastMousePoint.getY()));
-	}
-	
-	private Point getMousePoint(MouseEvent pEvent)
-	{
-		return new Point((int)pEvent.getX(), (int)pEvent.getY());
-	}
 
 	private Optional<? extends DiagramElement> getSelectedElement(MouseEvent pEvent)
 	{
@@ -303,7 +276,7 @@ public class DiagramCanvasController
 				// The test is necessary to ensure we don't undo multiple selections
 				aSelectionModel.set(element.get());
 			}
-			aDragMode = DragMode.DRAG_MOVE;
+			aDragMode = new MoveDragMode(this);
 			aMoveTracker.startTrackingMove(aSelectionModel);
 		}
 		else // Nothing is selected
@@ -312,7 +285,7 @@ public class DiagramCanvasController
 			{
 				aSelectionModel.clearSelection();
 			}
-			aDragMode = DragMode.DRAG_LASSO;
+			aDragMode = new LassoDragMode(this);
 		}
 	}
 
@@ -356,7 +329,7 @@ public class DiagramCanvasController
 		Optional<? extends DiagramElement> element = getSelectedElement(pEvent);
 		if(element.isPresent() && element.get() instanceof Node) 
 		{
-			aDragMode = DragMode.DRAG_RUBBERBAND;
+			aDragMode = new RubberbandDragMode(this);
 		}
 	}
 
@@ -410,62 +383,26 @@ public class DiagramCanvasController
 		{
 			handleSingleClick(pEvent);
 		}
-		Point point = getMousePoint(pEvent);
-		aLastMousePoint = new Point(point.getX(), point.getY()); 
-		aMouseDownPoint = aLastMousePoint;
+		aDragMode.beginDrag(pEvent);
 		aCanvas.paintPanel();
 	}
 
 	private void mouseReleased(MouseEvent pEvent)
 	{
-		if (aDragMode == DragMode.DRAG_RUBBERBAND)
-		{
-			releaseRubberband(getMousePoint(pEvent));
-		}
-		else if(aDragMode == DragMode.DRAG_MOVE)
-		{
-			alignMoveToGrid(getMousePoint(pEvent));
-			releaseMove();
-		}
-		else if( aDragMode == DragMode.DRAG_LASSO )
-		{
-			aSelectionModel.deactivateLasso();
-		}
-		aDragMode = DragMode.DRAG_NONE;
+		aDragMode.endDrag(pEvent);
+		aDragMode = new NoneDragMode();
 	}
 	
-	/*
-	 * Move by a delta that will align the result of the move gesture with the grid.
-	 */
-	private void alignMoveToGrid(Point pMousePoint)
-	{
-		Iterator<Node> selectedNodes = aSelectionModel.getSelectedNodes().iterator();
-		if( selectedNodes.hasNext() )
-		{
-			// Pick one node in the selection model, arbitrarily
-			Node firstSelected = selectedNodes.next();
-			Point position = firstSelected.position();
-			Point snappedPosition = Grid.snapped(position);
-			final int dx = snappedPosition.getX() - position.getX();
-			final int dy = snappedPosition.getY() - position.getY();
-			for(Node selected : aSelectionModel.getSelectedNodes())
-			{
-				selected.translate(dx, dy);
-			}
-			aCanvas.paintPanel();
-		}
-	}
-	
-	private void releaseRubberband(Point pMousePoint)
+	public void releaseRubberband(Point pMouseDownPoint, Point pMousePoint)
 	{
 		assert aToolBar.getCreationPrototype().isPresent();
 		Edge newEdge = (Edge) ((Edge) aToolBar.getCreationPrototype().get()).clone();
-		if(pMousePoint.distance(aMouseDownPoint) > CONNECT_THRESHOLD )
+		if(pMousePoint.distance(pMouseDownPoint) > CONNECT_THRESHOLD )
 		{
-			if( aDiagramBuilder.canAdd(newEdge, aMouseDownPoint, pMousePoint))
+			if( aDiagramBuilder.canAdd(newEdge, pMouseDownPoint, pMousePoint))
 			{
 				aProcessor.executeNewOperation(aDiagramBuilder.createAddEdgeOperation(newEdge, 
-						aMouseDownPoint, pMousePoint));
+						pMouseDownPoint, pMousePoint));
 				setModified(true);
 				aSelectionModel.set(newEdge);
 				aCanvas.paintPanel();
@@ -474,7 +411,7 @@ public class DiagramCanvasController
 		aSelectionModel.deactivateRubberband();
 	}
 	
-	private void releaseMove()
+	public void releaseMove()
 	{
 		setModified(true);
 		CompoundOperation operation = aMoveTracker.endTrackingMove(aDiagramBuilder);
@@ -487,67 +424,27 @@ public class DiagramCanvasController
 
 	private void mouseDragged(MouseEvent pEvent)
 	{
-		Point mousePoint = getMousePoint(pEvent);
-		Point pointToReveal = mousePoint;
-		if(aDragMode == DragMode.DRAG_MOVE ) 
-		{
-			pointToReveal = computePointToReveal(mousePoint);
-			moveSelection(mousePoint);
-		}
-		else if(aDragMode == DragMode.DRAG_LASSO)
-		{
-			aLastMousePoint = mousePoint;
-			if( !pEvent.isControlDown() )
-			{
-				aSelectionModel.clearSelection();
-			}
-			aSelectionModel.activateLasso(computeLasso(), aCanvas.getDiagram());
-		}
-		else if(aDragMode == DragMode.DRAG_RUBBERBAND)
-		{
-			aLastMousePoint = mousePoint;
-			aSelectionModel.activateRubberband(computeRubberband());
-		}
+		Point pointToReveal = aDragMode.drag(pEvent);
 		aHandler.interactionTo(pointToReveal);
 	}
-	
-	// finds the point to reveal based on the entire selection
-	private Point computePointToReveal(Point pMousePoint)
-	{
-		Rectangle bounds = aSelectionModel.getSelectionBounds();
-		int x = bounds.getMaxX();
-		int y = bounds.getMaxY();
-		
-		if( pMousePoint.getX() < aLastMousePoint.getX()) 	 // Going left, reverse coordinate
-		{
-			x = bounds.getX(); 
-		}
-		if( pMousePoint.getY() < aLastMousePoint.getY())	// Going up, reverse coordinate
-		{
-			y = bounds.getY(); 
-		}
-		return new Point(x, y);
-	}
-	
-	// TODO, include edges between selected nodes in the bounds check.
-	// This will be doable by collecting all edges connected to a transitively selected node.
-	private void moveSelection(Point pMousePoint)
-	{
-		int dx = (int)(pMousePoint.getX() - aLastMousePoint.getX());
-		int dy = (int)(pMousePoint.getY() - aLastMousePoint.getY());
 
-		// Ensure the selection does not exceed the canvas bounds
-		Rectangle bounds = aSelectionModel.getSelectionBounds();
-		dx = Math.max(dx, -bounds.getX());
-		dy = Math.max(dy, -bounds.getY());
-		dx = Math.min(dx, (int) aCanvas.getWidth() - bounds.getMaxX());
-		dy = Math.min(dy, (int) aCanvas.getHeight() - bounds.getMaxY());
-
-		for(Node selected : aSelectionModel.getSelectedNodes())
-		{
-			selected.translate(dx, dy);
-		}
-		aLastMousePoint = pMousePoint; 
+	public void repaint()
+	{
 		aCanvas.paintPanel();
+	}
+
+	public Diagram getDiagram()
+	{
+		return aCanvas.getDiagram();
+	}
+
+	public int getCanvasWidth()
+	{
+		return (int) aCanvas.getWidth();
+	}
+
+	public int getCanvasHeight()
+	{
+		return (int) aCanvas.getHeight();
 	}
 }

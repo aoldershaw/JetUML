@@ -22,27 +22,20 @@
 package ca.mcgill.cs.jetuml.gui;
 
 import static ca.mcgill.cs.jetuml.application.ApplicationResources.RESOURCES;
+import static ca.mcgill.cs.jetuml.gui.ImageExporter.KEY_LAST_EXPORT_DIR;
+import static ca.mcgill.cs.jetuml.gui.ImageExporter.KEY_LAST_IMAGE_FORMAT;
 
-import java.awt.Color;
-import java.awt.Graphics2D;
-import java.awt.image.BufferedImage;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.text.MessageFormat;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.prefs.Preferences;
 import java.util.stream.Stream;
 
-import javax.imageio.ImageIO;
-
 import ca.mcgill.cs.jetuml.UMLEditor;
 import ca.mcgill.cs.jetuml.application.FileExtensions;
-import ca.mcgill.cs.jetuml.application.RecentFilesQueue;
 import ca.mcgill.cs.jetuml.application.UserPreferences;
 import ca.mcgill.cs.jetuml.application.UserPreferences.BooleanPreference;
 import ca.mcgill.cs.jetuml.application.UserPreferences.IntegerPreference;
@@ -52,7 +45,6 @@ import ca.mcgill.cs.jetuml.geom.Rectangle;
 import ca.mcgill.cs.jetuml.persistence.DeserializationException;
 import ca.mcgill.cs.jetuml.persistence.PersistenceService;
 import ca.mcgill.cs.jetuml.views.ImageCreator;
-import javafx.embed.swing.SwingFXUtils;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Alert.AlertType;
 import javafx.scene.control.ButtonType;
@@ -68,7 +60,6 @@ import javafx.scene.input.Clipboard;
 import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.BorderPane;
 import javafx.stage.FileChooser;
-import javafx.stage.FileChooser.ExtensionFilter;
 import javafx.stage.Stage;
 
 /**
@@ -76,14 +67,10 @@ import javafx.stage.Stage;
  */
 public class EditorFrame extends BorderPane
 {
-	private static final String KEY_LAST_EXPORT_DIR = "lastExportDir";
 	private static final String KEY_LAST_SAVEAS_DIR = "lastSaveAsDir";
-	private static final String KEY_LAST_IMAGE_FORMAT = "lastImageFormat";
-	
-	private static final String[] IMAGE_FORMATS = validFormats("png", "jpg", "gif", "bmp");
 	
 	private Stage aMainStage;
-	private RecentFilesQueue aRecentFiles = new RecentFilesQueue();
+	private RecentFilesManager aRecentFilesManager = new RecentFilesManager(this::buildRecentFilesMenu);
 	private Menu aRecentFilesMenu;
 	private WelcomeTab aWelcomeTab;
 	
@@ -95,7 +82,6 @@ public class EditorFrame extends BorderPane
 	public EditorFrame(Stage pMainStage) 
 	{
 		aMainStage = pMainStage;
-		aRecentFiles.deserialize(Preferences.userNodeForPackage(UMLEditor.class).get("recent", "").trim());
 
 		MenuBar menuBar = new MenuBar();
 		setTop(menuBar);
@@ -113,22 +99,6 @@ public class EditorFrame extends BorderPane
 		
 		aWelcomeTab = new WelcomeTab(newDiagramHandlers);
 		showWelcomeTabIfNecessary();
-	}
-	
-	/* Returns the subset of pDesiredFormats for which a registered image writer 
-	 * claims to recognized the format */
-	private static String[] validFormats(String... pDesiredFormats)
-	{
-		List<String> recognizedWriters = Arrays.asList(ImageIO.getWriterFormatNames());
-		List<String> validFormats = new ArrayList<>();
-		for( String format : pDesiredFormats )
-		{
-			if( recognizedWriters.contains(format))
-			{
-				validFormats.add(format);
-			}
-		}
-		return validFormats.toArray(new String[validFormats.size()]);
 	}
 	
 	/*
@@ -162,8 +132,8 @@ public class EditorFrame extends BorderPane
 		}
 		
 		aRecentFilesMenu = factory.createMenu("file.recent", false);
-		buildRecentFilesMenu();
-		
+		aRecentFilesManager.triggerObserver();
+
 		// Standard factory invocation
 		pMenuBar.getMenus().add(factory.createMenu("file", false, 
 				newMenu,
@@ -232,7 +202,7 @@ public class EditorFrame extends BorderPane
 						((DiagramTab) tab).getFile().getAbsoluteFile().equals(new File(pName).getAbsoluteFile())) 
 				{
 					tabPane().getSelectionModel().select(tab);
-					addRecentFile(new File(pName).getPath());
+					aRecentFilesManager.addRecentFile(new File(pName).getPath());
 					return;
 				}
 			}
@@ -253,7 +223,7 @@ public class EditorFrame extends BorderPane
 			
 			DiagramTab frame2 = new DiagramTab(diagram2);
 			frame2.setFile(new File(pName).getAbsoluteFile());
-			addRecentFile(new File(pName).getPath());
+			aRecentFilesManager.addRecentFile(new File(pName).getPath());
 			insertGraphFrameIntoTabbedPane(frame2);
 		}
 		catch (IOException | DeserializationException exception2) 
@@ -278,16 +248,6 @@ public class EditorFrame extends BorderPane
 		alert.showAndWait();
 	}
 	
-	private List<NamedHandler> getOpenFileHandlers()
-	{
-		List<NamedHandler> result = new ArrayList<>();
-		for( File file : aRecentFiles )
-   		{
-			result.add(new NamedHandler(file.getName(), pEvent -> open(file.getAbsolutePath())));
-   		}
-		return Collections.unmodifiableList(result);
-	}
-	
 	private List<NewDiagramHandler> createNewDiagramHandlers()
 	{
 		List<NewDiagramHandler> result = new ArrayList<>();
@@ -301,43 +261,10 @@ public class EditorFrame extends BorderPane
 		return Collections.unmodifiableList(result);
 	}
 
-	/*
-	 * Adds a file name to the "recent files" list and rebuilds the "recent files"
-	 * menu.
-	 * 
-	 * @param pNewFile the file name to add
-	 */
-	private void addRecentFile(String pNewFile) 
-	{
-		aRecentFiles.add(pNewFile);
-		buildRecentFilesMenu();
-	}
-	
-   	/*
-   	 * Rebuilds the "recent files" menu. Only works if the number of
-   	 * recent files is less than 10. Otherwise, additional logic will need
-   	 * to be added to 0-index the mnemonics for files 1-9.
-   	 */
-   	private void buildRecentFilesMenu()
-   	{ 
-   		aRecentFilesMenu.getItems().clear();
-   		aRecentFilesMenu.setDisable(!(aRecentFiles.size() > 0));
-   		int i = 1;
-   		for( File file : aRecentFiles )
-   		{
-   			String name = "_" + i + " " + file.getName();
-   			final String fileName = file.getAbsolutePath();
-   			MenuItem item = new MenuItem(name);
-   			aRecentFilesMenu.getItems().add(item);
-   			item.setOnAction(pEvent -> open(fileName));
-            i++;
-   		}
-   }
-
 	private void openFile() 
 	{
 		FileChooser fileChooser = new FileChooser();
-		fileChooser.setInitialDirectory(aRecentFiles.getMostRecentDirectory());
+		fileChooser.setInitialDirectory(aRecentFilesManager.getMostRecentDirectory());
 		fileChooser.getExtensionFilters().addAll(FileExtensions.getAll());
 
 		File selectedFile = fileChooser.showOpenDialog(aMainStage);
@@ -476,7 +403,7 @@ public class EditorFrame extends BorderPane
 			if(result != null) 
 			{
 				PersistenceService.save(diagram, result);
-				addRecentFile(result.getAbsolutePath());
+				aRecentFilesManager.addRecentFile(result.getAbsolutePath());
 				frame.setFile(result);
 				frame.setText(frame.getFile().getName());
 				frame.setModified(false);
@@ -495,31 +422,24 @@ public class EditorFrame extends BorderPane
 		}
 	}
 
-	/**
-	 * Edits the file path so that the pToBeRemoved extension, if found, is replaced
-	 * with pDesired.
-	 * 
-	 * @param pOriginal
-	 *            the file to use as a starting point
-	 * @param pToBeRemoved
-	 *            the extension that is to be removed before adding the desired
-	 *            extension.
-	 * @param pDesired
-	 *            the desired extension (e.g. ".png")
-	 * @return original if it already has the desired extension, or a new file with
-	 *         the edited file path
+	/*
+	 * Rebuilds the "recent files" menu. Only works if the number of
+	 * recent files is less than 10. Otherwise, additional logic will need
+	 * to be added to 0-index the mnemonics for files 1-9.
 	 */
-	static String replaceExtension(String pOriginal, String pToBeRemoved, String pDesired) 
+	private void buildRecentFilesMenu(Iterable<File> files)
 	{
-		assert pOriginal != null && pToBeRemoved != null && pDesired != null;
-
-		if (pOriginal.endsWith(pToBeRemoved)) 
+		aRecentFilesMenu.getItems().clear();
+		aRecentFilesMenu.setDisable(!files.iterator().hasNext());
+		int i = 1;
+		for( File file : files )
 		{
-			return pOriginal.substring(0, pOriginal.length() - pToBeRemoved.length()) + pDesired;
-		}
-		else 
-		{
-			return pOriginal;
+			String name = "_" + i + " " + file.getName();
+			final String fileName = file.getAbsolutePath();
+			MenuItem item = new MenuItem(name);
+			aRecentFilesMenu.getItems().add(item);
+			item.setOnAction(pEvent -> open(fileName));
+			i++;
 		}
 	}
 
@@ -542,96 +462,32 @@ public class EditorFrame extends BorderPane
 	/**
 	 * Exports the current graph to an image file.
 	 */
-	private void exportImage() 
+	private void exportImage()
 	{
-		FileChooser fileChooser = getImageFileChooser(getLastDir(KEY_LAST_EXPORT_DIR), 
+		DiagramTab frame = getSelectedDiagramTab();
+		FileChooser fileChooser = ImageExporter.getImageFileChooser(frame, getLastDir(KEY_LAST_EXPORT_DIR),
 				Preferences.userNodeForPackage(UMLEditor.class).get(KEY_LAST_IMAGE_FORMAT, "png"));
 		File file = fileChooser.showSaveDialog(aMainStage);
 		if(file == null) 
 		{
 			return;
 		}
-
-		String fileName = file.getPath();
-		String format = fileName.substring(fileName.lastIndexOf(".") + 1);
-		Preferences.userNodeForPackage(UMLEditor.class).put(KEY_LAST_IMAGE_FORMAT, format);
-				
 		File dir = file.getParentFile();
 		if( dir != null )
 		{
 			setLastDir(KEY_LAST_EXPORT_DIR, dir);
 		}
-		DiagramTab frame = getSelectedDiagramTab();
-		try (OutputStream out = new FileOutputStream(file)) 
+
+		try
 		{
-			BufferedImage image = getBufferedImage(frame.getDiagram()); 
-			if(format.equals("jpg"))	// to correct the display of JPEG/JPG images (removes red hue)
-			{
-				BufferedImage imageRGB = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.OPAQUE);
-				Graphics2D graphics = imageRGB.createGraphics();
-				graphics.drawImage(image, 0,  0, null);
-				ImageIO.write(imageRGB, format, out);
-				graphics.dispose();
-			}
-			else if(format.equals("bmp"))	// to correct the BufferedImage type
-			{
-				BufferedImage imageRGB = new BufferedImage(image.getWidth(), image.getHeight(), BufferedImage.TYPE_INT_RGB);
-				Graphics2D graphics = imageRGB.createGraphics();
-				graphics.drawImage(image, 0, 0, Color.WHITE, null);
-				ImageIO.write(imageRGB, format, out);
-				graphics.dispose();
-			}
-			else
-			{
-				ImageIO.write(image, format, out);
-			}
-		} 
+			ImageExporter.exportDiagram(frame.getDiagram(), file);
+		}
 		catch(IOException exception) 
 		{
 			Alert alert = new Alert(AlertType.ERROR, RESOURCES.getString("error.save_file"), ButtonType.OK);
 			alert.initOwner(aMainStage);
 			alert.showAndWait();
 		}
-	}
-	
-	private FileChooser getImageFileChooser(File pInitialDirectory, String pInitialFormat) 
-	{
-		assert pInitialDirectory.exists() && pInitialDirectory.isDirectory();
-		DiagramTab frame = getSelectedDiagramTab();
-
-		FileChooser fileChooser = new FileChooser();
-		for(String format : IMAGE_FORMATS ) 
-		{
-			ExtensionFilter filter = new ExtensionFilter(format.toUpperCase() + " " + RESOURCES.getString("files.image.name"), "*." +format);
-			fileChooser.getExtensionFilters().add(filter);
-			if( format.equals(pInitialFormat ))
-			{
-				fileChooser.setSelectedExtensionFilter(filter);
-			}
-		}
-		fileChooser.setInitialDirectory(pInitialDirectory);
-
-		// If the file was previously saved, use that to suggest a file name root.
-		if(frame.getFile() != null) 
-		{
-			File file = new File(replaceExtension(frame.getFile().getAbsolutePath(), RESOURCES.getString("application.file.extension"), ""));
-			fileChooser.setInitialDirectory(file.getParentFile());
-			fileChooser.setInitialFileName(file.getName());
-		}
-		return fileChooser;
-	}
-
-	/*
-	 * Return the image corresponding to the graph.
-	 * 
-	 * @param pDiagram The graph to convert to an image.
-	 * 
-	 * @return bufferedImage. To convert it into an image, use the syntax :
-	 * Toolkit.getDefaultToolkit().createImage(bufferedImage.getSource());
-	 */
-	private static BufferedImage getBufferedImage(Diagram pDiagram) 
-	{
-		return SwingFXUtils.fromFXImage(ImageCreator.createImage(pDiagram), null);
 	}
 	
 	private int getNumberOfDirtyDiagrams()
@@ -662,13 +518,13 @@ public class EditorFrame extends BorderPane
 
 			if (alert.getResult() == ButtonType.YES) 
 			{
-				Preferences.userNodeForPackage(UMLEditor.class).put("recent", aRecentFiles.serialize());
+				aRecentFilesManager.storeRecentFiles();
 				System.exit(0);
 			}
 		}
 		else 
 		{
-			Preferences.userNodeForPackage(UMLEditor.class).put("recent", aRecentFiles.serialize());
+			aRecentFilesManager.storeRecentFiles();
 			System.exit(0);
 		}
 	}		
@@ -708,7 +564,7 @@ public class EditorFrame extends BorderPane
 	{
 		if( tabs().size() == 0)
 		{
-			aWelcomeTab.loadRecentFileLinks(getOpenFileHandlers());
+			aWelcomeTab.loadRecentFileLinks(aRecentFilesManager.getOpenFileHandlers((file) -> open(file.getAbsolutePath())));
 			tabs().add(aWelcomeTab);
 		}
 	}

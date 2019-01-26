@@ -22,7 +22,9 @@ package ca.mcgill.cs.jetuml.gui;
 
 import ca.mcgill.cs.jetuml.application.UserPreferences;
 import ca.mcgill.cs.jetuml.application.UserPreferences.BooleanPreference;
+import ca.mcgill.cs.jetuml.geom.Point;
 import ca.mcgill.cs.jetuml.geom.Rectangle;
+import javafx.scene.input.MouseEvent;
 import javafx.stage.Screen;
 
 /**
@@ -76,5 +78,10 @@ public final class GuiUtils
 	public static int defaultDiagramHeight()
 	{
 		return defaultStageBounds().getHeight() - HEIGHT_PADDING;
+	}
+
+	public static Point getMousePoint(MouseEvent pEvent)
+	{
+		return new Point((int)pEvent.getX(), (int)pEvent.getY());
 	}
 }
