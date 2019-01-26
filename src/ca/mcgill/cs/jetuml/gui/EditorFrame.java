@@ -22,32 +22,17 @@
 package ca.mcgill.cs.jetuml.gui;
 
 import static ca.mcgill.cs.jetuml.application.ApplicationResources.RESOURCES;
-import static ca.mcgill.cs.jetuml.gui.ImageExporter.KEY_LAST_EXPORT_DIR;
-import static ca.mcgill.cs.jetuml.gui.ImageExporter.KEY_LAST_IMAGE_FORMAT;
 
 import java.io.File;
-import java.io.IOException;
-import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
-import java.util.prefs.Preferences;
 import java.util.stream.Stream;
 
-import ca.mcgill.cs.jetuml.UMLEditor;
 import ca.mcgill.cs.jetuml.application.FileExtensions;
 import ca.mcgill.cs.jetuml.application.UserPreferences;
 import ca.mcgill.cs.jetuml.application.UserPreferences.BooleanPreference;
-import ca.mcgill.cs.jetuml.application.UserPreferences.IntegerPreference;
-import ca.mcgill.cs.jetuml.diagram.Diagram;
 import ca.mcgill.cs.jetuml.diagram.DiagramType;
-import ca.mcgill.cs.jetuml.geom.Rectangle;
-import ca.mcgill.cs.jetuml.persistence.DeserializationException;
-import ca.mcgill.cs.jetuml.persistence.PersistenceService;
-import ca.mcgill.cs.jetuml.views.ImageCreator;
-import javafx.scene.control.Alert;
-import javafx.scene.control.Alert.AlertType;
-import javafx.scene.control.ButtonType;
 import javafx.scene.control.CheckMenuItem;
 import javafx.scene.control.Menu;
 import javafx.scene.control.MenuBar;
@@ -55,9 +40,6 @@ import javafx.scene.control.MenuItem;
 import javafx.scene.control.SeparatorMenuItem;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
-import javafx.scene.image.Image;
-import javafx.scene.input.Clipboard;
-import javafx.scene.input.ClipboardContent;
 import javafx.scene.layout.BorderPane;
 import javafx.stage.FileChooser;
 import javafx.stage.Stage;
@@ -67,10 +49,9 @@ import javafx.stage.Stage;
  */
 public class EditorFrame extends BorderPane
 {
-	private static final String KEY_LAST_SAVEAS_DIR = "lastSaveAsDir";
-	
 	private Stage aMainStage;
 	private RecentFilesManager aRecentFilesManager = new RecentFilesManager(this::buildRecentFilesMenu);
+	private FileMenuOperations aFileMenuOperations;
 	private Menu aRecentFilesMenu;
 	private WelcomeTab aWelcomeTab;
 	
@@ -98,6 +79,8 @@ public class EditorFrame extends BorderPane
 		setMenuVisibility();
 		
 		aWelcomeTab = new WelcomeTab(newDiagramHandlers);
+		aFileMenuOperations = new FileMenuOperations(aRecentFilesManager, aMainStage);
+		
 		showWelcomeTabIfNecessary();
 	}
 	
@@ -137,7 +120,7 @@ public class EditorFrame extends BorderPane
 		// Standard factory invocation
 		pMenuBar.getMenus().add(factory.createMenu("file", false, 
 				newMenu,
-				factory.createMenuItem("file.open", false, pEvent -> openFile()),
+				factory.createMenuItem("file.open", false, pEvent -> openWithSelector()),
 				aRecentFilesMenu,
 				factory.createMenuItem("file.close", true, pEvent -> close()),
 				factory.createMenuItem("file.save", true, pEvent -> save()),
@@ -146,6 +129,71 @@ public class EditorFrame extends BorderPane
 				factory.createMenuItem("file.copy_to_clipboard", true, pEvent -> copyToClipboard()),
 				new SeparatorMenuItem(),
 				factory.createMenuItem("file.exit", false, pEvent -> exit())));
+	}
+	
+	public void openWithSelector() 
+	{
+		FileChooser fileChooser = new FileChooser();
+		fileChooser.setInitialDirectory(aRecentFilesManager.getMostRecentDirectory());
+		fileChooser.getExtensionFilters().addAll(FileExtensions.getAll());
+
+		File selectedFile = fileChooser.showOpenDialog(aMainStage);
+		if (selectedFile != null) 
+		{
+			open(selectedFile.getAbsolutePath());
+		}
+		
+	}
+	
+	public void open(String pFileName) 
+	{
+		List<Tab> tabs = tabs();
+		TabPane pane = tabPane();
+		DiagramTab tabToOpen = aFileMenuOperations.open(pFileName, tabs, pane);
+		if (tabToOpen != null) 
+		{
+			insertGraphFrameIntoTabbedPane(tabToOpen);
+		}
+	}
+	
+	public void close() 
+	{
+		DiagramTab currentTab = getSelectedDiagramTab();
+		boolean shouldClose = aFileMenuOperations.close(currentTab);
+		if (shouldClose) 
+		{
+			removeGraphFrameFromTabbedPane(currentTab);
+		}
+	}
+	
+	public void save() 
+	{
+		DiagramTab currentTab = getSelectedDiagramTab();
+		aFileMenuOperations.save(currentTab);
+	}
+	
+	public void saveAs() 
+	{
+		DiagramTab currentTab = getSelectedDiagramTab();
+		aFileMenuOperations.saveAs(currentTab);
+	}
+	
+	public void exportImage() 
+	{
+		DiagramTab currentTab = getSelectedDiagramTab();
+		aFileMenuOperations.exportImage(currentTab);
+	}
+	
+	public void copyToClipboard() 
+	{
+		DiagramTab currentTab = getSelectedDiagramTab();
+		aFileMenuOperations.copyToClipboard(currentTab);
+	}
+	
+	public void exit() 
+	{
+		int modified = getNumberOfDirtyDiagrams();
+		aFileMenuOperations.exit(modified);
 	}
 	
 	private void createEditMenu(MenuBar pMenuBar) 
@@ -186,68 +234,6 @@ public class EditorFrame extends BorderPane
 				factory.createMenuItem("help.about", false, pEvent -> new AboutDialog(aMainStage).show())));
 	}
 	
-	/*
-	 * Opens a file with the given name, or switches to the frame if it is already
-	 * open.
-	 * 
-	 * @param pName the file name
-	 */
-	private void open(String pName) 
-	{
-		for( Tab tab : tabs() )
-		{
-			if(tab instanceof DiagramTab)
-			{
-				if(((DiagramTab) tab).getFile() != null	&& 
-						((DiagramTab) tab).getFile().getAbsoluteFile().equals(new File(pName).getAbsoluteFile())) 
-				{
-					tabPane().getSelectionModel().select(tab);
-					aRecentFilesManager.addRecentFile(new File(pName).getPath());
-					return;
-				}
-			}
-		}
-		
-		try 
-		{
-			Diagram diagram2 = PersistenceService.read(new File(pName));
-			
-			Rectangle bounds = DiagramType.newViewInstanceFor(diagram2).getBounds();
-			int viewWidth = UserPreferences.instance().getInteger(IntegerPreference.diagramWidth);
-			int viewHeight = UserPreferences.instance().getInteger(IntegerPreference.diagramHeight);
-			if( bounds.getMaxX() > viewWidth || bounds.getMaxY() > viewHeight )
-			{
-				showDiagramViewTooSmallAlert(bounds, viewWidth, viewHeight);
-				return;
-			}
-			
-			DiagramTab frame2 = new DiagramTab(diagram2);
-			frame2.setFile(new File(pName).getAbsoluteFile());
-			aRecentFilesManager.addRecentFile(new File(pName).getPath());
-			insertGraphFrameIntoTabbedPane(frame2);
-		}
-		catch (IOException | DeserializationException exception2) 
-		{
-			Alert alert = new Alert(AlertType.ERROR, RESOURCES.getString("error.open_file"), ButtonType.OK);
-			alert.initOwner(aMainStage);
-			alert.showAndWait();
-		}
-	}
-	
-	private void showDiagramViewTooSmallAlert(Rectangle pBounds, int pWidth, int pHeight)
-	{
-		String content = RESOURCES.getString("dialog.open.size_error_content");
-		content = content.replace("#1", Integer.toString(pBounds.getMaxX()));
-		content = content.replace("#2", Integer.toString(pBounds.getMaxY()));
-		content = content.replace("#3", Integer.toString(pWidth));
-		content = content.replace("#4", Integer.toString(pHeight));
-		Alert alert = new Alert(AlertType.ERROR, content, ButtonType.OK);
-		alert.setTitle(RESOURCES.getString("alert.error.title"));
-		alert.setHeaderText(RESOURCES.getString("dialog.open.size_error_header"));
-		alert.initOwner(aMainStage);
-		alert.showAndWait();
-	}
-	
 	private List<NewDiagramHandler> createNewDiagramHandlers()
 	{
 		List<NewDiagramHandler> result = new ArrayList<>();
@@ -261,36 +247,7 @@ public class EditorFrame extends BorderPane
 		return Collections.unmodifiableList(result);
 	}
 
-	private void openFile() 
-	{
-		FileChooser fileChooser = new FileChooser();
-		fileChooser.setInitialDirectory(aRecentFilesManager.getMostRecentDirectory());
-		fileChooser.getExtensionFilters().addAll(FileExtensions.getAll());
-
-		File selectedFile = fileChooser.showOpenDialog(aMainStage);
-		if (selectedFile != null) 
-		{
-			open(selectedFile.getAbsolutePath());
-		}
-	}
-
-	/**
-	 * Copies the current image to the clipboard.
-	 */
-	public void copyToClipboard() 
-	{
-		DiagramTab frame = getSelectedDiagramTab();
-		final Image image = ImageCreator.createImage(frame.getDiagram());
-		final Clipboard clipboard = Clipboard.getSystemClipboard();
-	    final ClipboardContent content = new ClipboardContent();
-	    content.putImage(image);
-	    clipboard.setContent(content);
-		Alert alert = new Alert(AlertType.INFORMATION, RESOURCES.getString("dialog.to_clipboard.message"), ButtonType.OK);
-		alert.initOwner(aMainStage);
-		alert.setHeaderText(RESOURCES.getString("dialog.to_clipboard.title"));
-		alert.showAndWait();
-	}
-
+	
 	/* @pre there is a selected diagram tab, not just the welcome tab */
 	private DiagramTab getSelectedDiagramTab()
 	{
@@ -299,140 +256,17 @@ public class EditorFrame extends BorderPane
 		return (DiagramTab) tab;
 	}
 
-	private void close() 
-	{
-		DiagramTab openFrame = getSelectedDiagramTab();
-		// we only want to check attempts to close a frame
-		if (openFrame.isModified()) 
-		{
-			// ask user if it is ok to close
-			Alert alert = new Alert(AlertType.CONFIRMATION, RESOURCES.getString("dialog.close.ok"), ButtonType.YES, ButtonType.NO);
-			alert.initOwner(aMainStage);
-			alert.setTitle(RESOURCES.getString("dialog.close.title"));
-			alert.setHeaderText(RESOURCES.getString("dialog.close.title"));
-			alert.showAndWait();
-
-			if (alert.getResult() == ButtonType.YES) 
-			{
-				removeGraphFrameFromTabbedPane(openFrame);
-			}
-			return;
-		} 
-		else 
-		{
-			removeGraphFrameFromTabbedPane(openFrame);
-		}
-	}
-
-	/**
-	 * If a user confirms that they want to close their modified graph, this method
-	 * will remove it from the current list of tabs.
-	 * 
-	 * @param pDiagramTab The current Tab that one wishes to close.
-	 */
-	public void close(DiagramTab pDiagramTab) 
-	{
-		if(pDiagramTab.isModified()) 
-		{
-			Alert alert = new Alert(AlertType.CONFIRMATION, RESOURCES.getString("dialog.close.ok"), ButtonType.YES, ButtonType.NO);
-			alert.initOwner(aMainStage);
-			alert.setTitle(RESOURCES.getString("dialog.close.title"));
-			alert.setHeaderText(RESOURCES.getString("dialog.close.title"));
-			alert.showAndWait();
-
-			if (alert.getResult() == ButtonType.YES) 
-			{
-				removeGraphFrameFromTabbedPane(pDiagramTab);
-			}
-		}
-		else
-		{
-			removeGraphFrameFromTabbedPane(pDiagramTab);
-		}
-	}
-
-	private void save() 
-	{
-		DiagramTab frame = getSelectedDiagramTab();
-		File file = frame.getFile();
-		if(file == null) 
-		{
-			saveAs();
-			return;
-		}
-		try 
-		{
-			PersistenceService.save(frame.getDiagram(), file);
-			frame.setModified(false);
-		} 
-		catch(IOException exception) 
-		{
-			Alert alert = new Alert(AlertType.ERROR, RESOURCES.getString("error.save_file"), ButtonType.OK);
-			alert.initOwner(aMainStage);
-			alert.showAndWait();
-		}
-	}
-
-	private void saveAs() 
-	{
-		DiagramTab frame = (DiagramTab) getSelectedDiagramTab();
-		Diagram diagram = frame.getDiagram();
-
-		FileChooser fileChooser = new FileChooser();
-		fileChooser.getExtensionFilters().addAll(FileExtensions.getAll());
-		fileChooser.setSelectedExtensionFilter(FileExtensions.get(diagram.getDescription()));
-
-		if (frame.getFile() != null) 
-		{
-			fileChooser.setInitialDirectory(frame.getFile().getParentFile());
-			fileChooser.setInitialFileName(frame.getFile().getName());
-		} 
-		else 
-		{
-			fileChooser.setInitialDirectory(getLastDir(KEY_LAST_SAVEAS_DIR));
-			fileChooser.setInitialFileName("");
-		}
-
-		try 
-		{
-			File result = fileChooser.showSaveDialog(aMainStage);
-			if(fileChooser.getSelectedExtensionFilter() != FileExtensions.get(diagram.getDescription()))
-			{
-				result = new File(result.getPath() + diagram.getFileExtension() + RESOURCES.getString("application.file.extension"));
-			}
-			if(result != null) 
-			{
-				PersistenceService.save(diagram, result);
-				aRecentFilesManager.addRecentFile(result.getAbsolutePath());
-				frame.setFile(result);
-				frame.setText(frame.getFile().getName());
-				frame.setModified(false);
-				File dir = result.getParentFile();
-				if( dir != null )
-				{
-					setLastDir(KEY_LAST_SAVEAS_DIR, dir);
-				}
-			}
-		} 
-		catch (IOException exception) 
-		{
-			Alert alert = new Alert(AlertType.ERROR, RESOURCES.getString("error.save_file"), ButtonType.OK);
-			alert.initOwner(aMainStage);
-			alert.showAndWait();
-		}
-	}
-
 	/*
 	 * Rebuilds the "recent files" menu. Only works if the number of
 	 * recent files is less than 10. Otherwise, additional logic will need
 	 * to be added to 0-index the mnemonics for files 1-9.
 	 */
-	private void buildRecentFilesMenu(Iterable<File> files)
+	private void buildRecentFilesMenu(Iterable<File> pFiles)
 	{
 		aRecentFilesMenu.getItems().clear();
-		aRecentFilesMenu.setDisable(!files.iterator().hasNext());
+		aRecentFilesMenu.setDisable(!pFiles.iterator().hasNext());
 		int i = 1;
-		for( File file : files )
+		for( File file : pFiles )
 		{
 			String name = "_" + i + " " + file.getName();
 			final String fileName = file.getAbsolutePath();
@@ -443,91 +277,13 @@ public class EditorFrame extends BorderPane
 		}
 	}
 
-	private File getLastDir(String pKey)
-	{
-		String dir = Preferences.userNodeForPackage(UMLEditor.class).get(pKey, ".");
-		File result = new File(dir);
-		if( !(result.exists() && result.isDirectory()))
-		{
-			result = new File(".");
-		}
-		return result;
-	}
-	
-	private void setLastDir(String pKey, File pLastExportDir)
-	{
-		Preferences.userNodeForPackage(UMLEditor.class).put(pKey, pLastExportDir.getAbsolutePath().toString());
-	}
-	
-	/**
-	 * Exports the current graph to an image file.
-	 */
-	private void exportImage()
-	{
-		DiagramTab frame = getSelectedDiagramTab();
-		FileChooser fileChooser = ImageExporter.getImageFileChooser(frame, getLastDir(KEY_LAST_EXPORT_DIR),
-				Preferences.userNodeForPackage(UMLEditor.class).get(KEY_LAST_IMAGE_FORMAT, "png"));
-		File file = fileChooser.showSaveDialog(aMainStage);
-		if(file == null) 
-		{
-			return;
-		}
-		File dir = file.getParentFile();
-		if( dir != null )
-		{
-			setLastDir(KEY_LAST_EXPORT_DIR, dir);
-		}
-
-		try
-		{
-			ImageExporter.exportDiagram(frame.getDiagram(), file);
-		}
-		catch(IOException exception) 
-		{
-			Alert alert = new Alert(AlertType.ERROR, RESOURCES.getString("error.save_file"), ButtonType.OK);
-			alert.initOwner(aMainStage);
-			alert.showAndWait();
-		}
-	}
-	
 	private int getNumberOfDirtyDiagrams()
 	{
 		return (int) tabs().stream()
 			.filter( tab -> tab instanceof DiagramTab ) 
 			.filter( frame -> ((DiagramTab) frame).isModified())
 			.count();
-	}
-
-	/**
-	 * Exits the program if no graphs have been modified or if the user agrees to
-	 * abandon modified graphs.
-	 */
-	public void exit() 
-	{
-		final int modcount = getNumberOfDirtyDiagrams();
-		if (modcount > 0) 
-		{
-			Alert alert = new Alert(AlertType.CONFIRMATION, 
-					MessageFormat.format(RESOURCES.getString("dialog.exit.ok"), new Object[] { Integer.valueOf(modcount) }),
-					ButtonType.YES, 
-					ButtonType.NO);
-			alert.initOwner(aMainStage);
-			alert.setTitle(RESOURCES.getString("dialog.exit.title"));
-			alert.setHeaderText(RESOURCES.getString("dialog.exit.title"));
-			alert.showAndWait();
-
-			if (alert.getResult() == ButtonType.YES) 
-			{
-				aRecentFilesManager.storeRecentFiles();
-				System.exit(0);
-			}
-		}
-		else 
-		{
-			aRecentFilesManager.storeRecentFiles();
-			System.exit(0);
-		}
-	}		
+	}	
 	
 	private List<Tab> tabs()
 	{
@@ -564,7 +320,8 @@ public class EditorFrame extends BorderPane
 	{
 		if( tabs().size() == 0)
 		{
-			aWelcomeTab.loadRecentFileLinks(aRecentFilesManager.getOpenFileHandlers((file) -> open(file.getAbsolutePath())));
+			aWelcomeTab.loadRecentFileLinks(aRecentFilesManager.getOpenFileHandlers(file -> 
+			aFileMenuOperations.open(file.getAbsolutePath(), tabs(), tabPane())));
 			tabs().add(aWelcomeTab);
 		}
 	}

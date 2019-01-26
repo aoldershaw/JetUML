@@ -99,7 +99,7 @@ public class DiagramTab extends Tab implements MouseDraggedGestureHandler
 		{
 			pEvent.consume();
 			EditorFrame editorFrame = (EditorFrame) getTabPane().getParent();
-			editorFrame.close(this);
+			editorFrame.close();
 		});
 	}
 	
